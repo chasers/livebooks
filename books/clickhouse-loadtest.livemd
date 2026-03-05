@@ -370,7 +370,7 @@ defmodule Projects do
       |> SqlBuilder.where("project is not null")
       |> SqlBuilder.where("project != ''")
       |> SqlBuilder.group_by(:project)
-      |> SqlBuilder.limit(100)
+      |> SqlBuilder.limit(1000)
       |> SqlBuilder.settings(
         query_plan_optimize_lazy_materialization: 1,
         use_skip_indexes_for_top_k: 1,
@@ -620,4 +620,4 @@ Starts the load test GenServer with the live charts. Once started, it immediatel
 ClickhouseLoadtest.start_link(pid: pid, projects: projects, charts: charts)
 ```
 
-<!-- livebook:{"offset":19318,"stamp":{"token":"XCP.YLv2b1fDxNGlMjjKgOHqsDDbZYrb4_Ztm0gSe8R4BCUAPQoNLROs6h8pODA3QOZoLAqogm0nsiUmnIhYbAQtBYESVLt5zbHmJs-ntTNYX27nKEPTxC-gBLIJFZ93Qa6YWymbBsV5bLtg7qicCihtBp5w3H0FoeY","version":2}} -->
+<!-- livebook:{"offset":18484,"stamp":{"token":"XCP.A1tWT8hQtKzi9q1k9m9mPDgjN3pwiIezrAOoDb__9Lu_lFl5XFORe4AC6o_4euDrsjPzoIPNW3Vc4sMQUcYI_VFN00q1HpbsvVYJCYq72XMeDI1hhx1ULWR8FNFqkHAsjhMtQOs7gi705etLu9G4vAR65dIksZs","version":2}} -->
