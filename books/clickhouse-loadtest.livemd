@@ -283,7 +283,7 @@ defmodule SqlBuilder do
   defp build_select(%{select: []}), do: "select *"
 
   defp build_select(%{select: cols}) do
-    indented = cols |> Enum.map(&"  #{&1}") |> Enum.join("\n  ,")
+    indented = cols |> Enum.join("\n  ,")
     "select\n  #{indented}"
   end
 
@@ -331,6 +331,7 @@ defmodule SqlBuilder do
   end
 
   defp format_value(v) when is_binary(v), do: "'#{v}'"
+  defp format_value(v) when is_boolean(v), do: to_string(v)
   defp format_value(v) when is_atom(v), do: "'#{v}'"
   defp format_value(v), do: to_string(v)
 end
@@ -403,7 +404,7 @@ Fetches recent log entries for a specific project. Returns the last 100 logs fro
 ```elixir
 defmodule Logs do
   def get_logs!(pid, project \\ "project") do
-    table = "otel_logs_e2338e81_aed4_4de0_a5a0_358084c77b85"
+    table = "otel_logs_alt_e2338e81_aed4_4de0_a5a0_358084c77b85"
     sources = ["deno-relay-logs", "deno-subhosting-events"]
 
     sql =
@@ -620,4 +621,4 @@ Starts the load test GenServer with the live charts. Once started, it immediatel
 ClickhouseLoadtest.start_link(pid: pid, projects: projects, charts: charts)
 ```
 
-<!-- livebook:{"offset":18484,"stamp":{"token":"XCP.A1tWT8hQtKzi9q1k9m9mPDgjN3pwiIezrAOoDb__9Lu_lFl5XFORe4AC6o_4euDrsjPzoIPNW3Vc4sMQUcYI_VFN00q1HpbsvVYJCYq72XMeDI1hhx1ULWR8FNFqkHAsjhMtQOs7gi705etLu9G4vAR65dIksZs","version":2}} -->
+<!-- livebook:{"offset":18524,"stamp":{"token":"XCP._3qTZkTEB6o8raNmBPf19WM92RA4UcJka-TDGqnN7rabH5y-L0_vPcl1jkFMYsdaPYOMpj7OJ4tLDmKHefx2RIBoJ7GabQLj80LK5nVZSUizMOweIoNI8SSOO2n6EN0Ge5bTNnWhA-1KJI3FAFuqqFM5n63bxp0","version":2}} -->
