@@ -1,5 +1,9 @@
 # Clickhouse Loadtest
 
+## Section
+
+A load testing tool for ClickHouse databases. Simulates concurrent query load by repeatedly fetching logs for random projects, measuring response times, and tracking bytes read. Useful for benchmarking query performance and testing ClickHouse cluster capacity.
+
 ```elixir
 Mix.install([
   {:ch, "~> 0.3.2"},
@@ -11,6 +15,8 @@ Mix.install([
 ```
 
 ## Setup
+
+Establishes the ClickHouse connection using credentials from environment variables. Creates a connection pool with 25 connections and a 15-second timeout. The `pid` returned is used by all subsequent queries.
 
 ```elixir
 defaults = [
@@ -37,6 +43,8 @@ defaults = [
 ```
 
 ## SqlBuilder
+
+A composable SQL query builder for constructing dynamic ClickHouse queries. Uses the builder pattern with pipe-friendly functions. Supports named parameter substitution (`{param}` syntax) with automatic quoting for strings.
 
 ```elixir
 defmodule SqlBuilder do
@@ -76,11 +84,28 @@ defmodule SqlBuilder do
             limit: nil,
             settings: []
 
-  @doc "Create a new empty query builder."
+  @doc """
+  Create a new empty query builder.
+
+  ## Examples
+
+      iex> SqlBuilder.new()
+      %SqlBuilder{select: [], from: nil, where: [], params: [], order_by: [], group_by: [], limit: nil, settings: []}
+  """
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @doc "Set the SELECT columns. Accepts atoms or strings."
+  @doc """
+  Set the SELECT columns. Accepts atoms or strings.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.select(:id) |> Map.get(:select)
+      ["id"]
+
+      iex> SqlBuilder.new() |> SqlBuilder.select([:id, :name, "count(*)"]) |> Map.get(:select)
+      ["id", "name", "count(*)"]
+  """
   @spec select(t(), [atom() | String.t()] | atom() | String.t()) :: t()
   def select(%__MODULE__{} = q, columns) when is_list(columns) do
     cols = Enum.map(columns, &to_string/1)
@@ -89,7 +114,17 @@ defmodule SqlBuilder do
 
   def select(%__MODULE__{} = q, column), do: select(q, [column])
 
-  @doc "Set the FROM table. Accepts a string or atom."
+  @doc """
+  Set the FROM table. Accepts a string or atom.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.from(:users) |> Map.get(:from)
+      "users"
+
+      iex> SqlBuilder.new() |> SqlBuilder.from("events") |> Map.get(:from)
+      "events"
+  """
   @spec from(t(), String.t() | atom()) :: t()
   def from(%__MODULE__{} = q, table), do: %{q | from: to_string(table)}
 
@@ -99,8 +134,16 @@ defmodule SqlBuilder do
   Parameters are written as `{param_name}` in the clause string and
   passed as a keyword list. String values are automatically quoted.
 
-      |> where("project = {project}", project: "my_project")
-      |> where("timestamp >= now() - interval {minutes} minute", minutes: 10)
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.where("active = true") |> Map.get(:where)
+      ["active = true"]
+
+      iex> SqlBuilder.new() |> SqlBuilder.where("name = {name}", name: "alice") |> Map.get(:where)
+      ["name = 'alice'"]
+
+      iex> SqlBuilder.new() |> SqlBuilder.where("count > {n}", n: 10) |> Map.get(:where)
+      ["count > 10"]
   """
   @spec where(t(), String.t(), keyword()) :: t()
   def where(%__MODULE__{} = q, clause, params \\ []) do
@@ -108,7 +151,17 @@ defmodule SqlBuilder do
     %{q | where: q.where ++ [rendered]}
   end
 
-  @doc "Add a WHERE col IN (...) clause."
+  @doc """
+  Add a WHERE col IN (...) clause.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.where_in(:status, ["active", "pending"]) |> Map.get(:where)
+      ["status in ('active', 'pending')"]
+
+      iex> SqlBuilder.new() |> SqlBuilder.where_in("id", [1, 2, 3]) |> Map.get(:where)
+      ["id in (1, 2, 3)"]
+  """
   @spec where_in(t(), String.t() | atom(), [term()]) :: t()
   def where_in(%__MODULE__{} = q, column, values) when is_list(values) do
     formatted =
@@ -120,36 +173,96 @@ defmodule SqlBuilder do
     %{q | where: q.where ++ [clause]}
   end
 
-  @doc "Add an ORDER BY clause."
+  @doc """
+  Add an ORDER BY clause.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.order_by(:created_at) |> Map.get(:order_by)
+      [{"created_at", :asc}]
+
+      iex> SqlBuilder.new() |> SqlBuilder.order_by(:timestamp, :desc) |> Map.get(:order_by)
+      [{"timestamp", :desc}]
+  """
   @spec order_by(t(), String.t() | atom(), :asc | :desc) :: t()
   def order_by(%__MODULE__{} = q, column, direction \\ :asc)
       when direction in [:asc, :desc] do
     %{q | order_by: q.order_by ++ [{to_string(column), direction}]}
   end
 
-  @doc "Add a GROUP BY column."
+  @doc """
+  Add a GROUP BY column.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.group_by(:project) |> Map.get(:group_by)
+      ["project"]
+
+      iex> SqlBuilder.new() |> SqlBuilder.group_by(:project) |> SqlBuilder.group_by(:status) |> Map.get(:group_by)
+      ["project", "status"]
+  """
   @spec group_by(t(), String.t() | atom()) :: t()
   def group_by(%__MODULE__{} = q, column) do
     %{q | group_by: q.group_by ++ [to_string(column)]}
   end
 
-  @doc "Set the LIMIT."
+  @doc """
+  Set the LIMIT.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.limit(100) |> Map.get(:limit)
+      100
+  """
   @spec limit(t(), pos_integer()) :: t()
   def limit(%__MODULE__{} = q, n) when is_integer(n) and n > 0, do: %{q | limit: n}
 
-  @doc "Add a ClickHouse SETTINGS key-value pair."
+  @doc """
+  Add a ClickHouse SETTINGS key-value pair.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.setting(:max_threads, 4) |> Map.get(:settings)
+      [max_threads: 4]
+  """
   @spec setting(t(), atom() | String.t(), term()) :: t()
   def setting(%__MODULE__{} = q, key, value) do
     %{q | settings: q.settings ++ [{key, value}]}
   end
 
-  @doc "Add multiple ClickHouse SETTINGS at once from a keyword list."
+  @doc """
+  Add multiple ClickHouse SETTINGS at once from a keyword list.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.settings(max_threads: 4, timeout: 30) |> Map.get(:settings)
+      [max_threads: 4, timeout: 30]
+  """
   @spec settings(t(), keyword()) :: t()
   def settings(%__MODULE__{} = q, kv) when is_list(kv) do
     Enum.reduce(kv, q, fn {k, v}, acc -> setting(acc, k, v) end)
   end
 
-  @doc "Build and return the final SQL string."
+  @doc """
+  Build and return the final SQL string.
+
+  ## Examples
+
+      iex> SqlBuilder.new() |> SqlBuilder.to_sql()
+      "select *"
+
+      iex> SqlBuilder.new() |> SqlBuilder.select([:id, :name]) |> SqlBuilder.from(:users) |> SqlBuilder.to_sql()
+      "select\\n  id\\n  ,name\\nfrom users"
+
+      iex> SqlBuilder.new()
+      ...> |> SqlBuilder.select(:id)
+      ...> |> SqlBuilder.from(:users)
+      ...> |> SqlBuilder.where("active = {active}", active: true)
+      ...> |> SqlBuilder.order_by(:id, :desc)
+      ...> |> SqlBuilder.limit(10)
+      ...> |> SqlBuilder.to_sql()
+      "select\\n  id\\nfrom users\\nwhere true\\n  and active = true\\norder by id desc\\nlimit 10"
+  """
   @spec to_sql(t()) :: String.t()
   def to_sql(%__MODULE__{} = q) do
     [
@@ -223,7 +336,24 @@ defmodule SqlBuilder do
 end
 ```
 
+### Doctests
+
+Runs the doctests defined in `SqlBuilder` to verify the query builder works correctly. All tests should pass before proceeding.
+
+```elixir
+ExUnit.start(autorun: false)
+
+defmodule SqlBuilderTest do
+  use ExUnit.Case, async: true
+  doctest SqlBuilder
+end
+
+ExUnit.run()
+```
+
 ## Projects
+
+Fetches a list of active projects from ClickHouse. Queries the OTEL logs table for projects with events in the last 10 minutes, returning both the highest and lowest activity projects. This list is used by the load tester to randomly select projects for querying.
 
 ```elixir
 defmodule Projects do
@@ -268,6 +398,8 @@ projects = Projects.get_projects(pid)
 
 ## Logs
 
+Fetches recent log entries for a specific project. Returns the last 100 logs from the past minute, ordered by timestamp descending. This is the query executed repeatedly during load testing.
+
 ```elixir
 defmodule Logs do
   def get_logs!(pid, project \\ "project") do
@@ -300,6 +432,8 @@ Logs.get_logs!(pid)
 ```
 
 ## Setup GenServer
+
+Defines the load testing GenServer that orchestrates concurrent queries. Spawns `@concurrency` (7) parallel tasks every `@tick` (1 second), each querying logs for a random project. Tracks response times, request counts, and total bytes read from ClickHouse. Periodically prints statistics to the console.
 
 ```elixir
 defmodule ClickhouseLoadtest do
@@ -416,17 +550,23 @@ end
 
 ## Start it
 
+Starts the load test GenServer. Once started, it immediately begins executing concurrent queries and printing statistics every second. The process runs continuously until stopped.
+
 ```elixir
 ClickhouseLoadtest.start_link(pid: pid, projects: projects)
 ```
 
 ## Graph
 
+Placeholder for real-time visualization of load test metrics (response times, throughput, etc.).
+
 ```elixir
 # todo
 ```
 
 ## Graph Test
+
+Demo of real-time charting with Kino and VegaLite. Renders a sine wave by pushing points to the chart incrementally. Use this as a reference for implementing the live metrics graph above.
 
 ```elixir
 alias VegaLite, as: Vl
@@ -451,4 +591,4 @@ for i <- 1..150 do
 end
 ```
 
-<!-- livebook:{"offset":12584,"stamp":{"token":"XCP.TuSp4GsxkFHzTa4MdC42bod6JQA415o12xriQ3szixihqcVgjX2VLMo3AJcCkSiC95AcvkN_BjZBv-7NuoRsCT571hpTmc-AyhiiPGV-Bym3-MXnrMtBkr1WG62wAvbut_e_VQOWuKNotdhySmrkt7_gA3Dj0ys","version":2}} -->
+<!-- livebook:{"offset":17514,"stamp":{"token":"XCP.e2CkvhnHt-oAwWjSwi6_GycLaPE1Law8Q3KofJZCTsdGyd5H9UvTSuzeQrYBe2IIW6xQBH6LidoA0yJPLM6xefmIrzYhtrgxidrOVRus9KJ0p2zeDQRADfTjznZTxGboJhVnojHRpiZGyyvu4qDkeM52oT0tj5E","version":2}} -->
