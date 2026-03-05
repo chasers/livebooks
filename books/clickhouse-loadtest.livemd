@@ -72,6 +72,7 @@ defmodule SqlBuilder do
             where: [],
             params: [],
             order_by: [],
+            group_by: [],
             limit: nil,
             settings: []
 
@@ -126,6 +127,12 @@ defmodule SqlBuilder do
     %{q | order_by: q.order_by ++ [{to_string(column), direction}]}
   end
 
+  @doc "Add a GROUP BY column."
+  @spec group_by(t(), String.t() | atom()) :: t()
+  def group_by(%__MODULE__{} = q, column) do
+    %{q | group_by: q.group_by ++ [to_string(column)]}
+  end
+
   @doc "Set the LIMIT."
   @spec limit(t(), pos_integer()) :: t()
   def limit(%__MODULE__{} = q, n) when is_integer(n) and n > 0, do: %{q | limit: n}
@@ -149,6 +156,7 @@ defmodule SqlBuilder do
       build_select(q),
       build_from(q),
       build_where(q),
+      build_group_by(q),
       build_order_by(q),
       build_limit(q),
       build_settings(q)
@@ -175,6 +183,9 @@ defmodule SqlBuilder do
     lines = clauses |> Enum.map(&"  and #{&1}") |> Enum.join("\n")
     "where true\n#{lines}"
   end
+
+  defp build_group_by(%{group_by: []}), do: nil
+  defp build_group_by(%{group_by: cols}), do: "group by #{Enum.join(cols, ", ")}"
 
   defp build_order_by(%{order_by: []}), do: nil
 
@@ -222,10 +233,13 @@ defmodule Projects do
 
     base =
       SqlBuilder.new()
-      |> SqlBuilder.select([:project])
+      |> SqlBuilder.select([:project, "count(id) as count"])
       |> SqlBuilder.from(table)
       |> SqlBuilder.where("timestamp >= now() - interval {minutes} minute", minutes: 10)
       # |> SqlBuilder.where_in("source_name", sources)
+      |> SqlBuilder.where("project is not null")
+      |> SqlBuilder.where("project != ''")
+      |> SqlBuilder.group_by(:project)
       |> SqlBuilder.limit(100)
       |> SqlBuilder.settings(
         query_plan_optimize_lazy_materialization: 1,
@@ -235,13 +249,13 @@ defmodule Projects do
         query_plan_max_limit_for_top_k_optimization: 3000
       )
 
-    desc_sql = base |> SqlBuilder.order_by(:timestamp, :desc) |> SqlBuilder.to_sql()
-    asc_sql = base |> SqlBuilder.order_by(:timestamp, :asc) |> SqlBuilder.to_sql()
+    desc_sql = base |> SqlBuilder.order_by(:count, :desc) |> SqlBuilder.to_sql()
+    asc_sql = base |> SqlBuilder.order_by(:count, :asc) |> SqlBuilder.to_sql()
 
     desc = Ch.query!(pid, desc_sql) |> Projects.map_projects()
     asc = Ch.query!(pid, asc_sql) |> Projects.map_projects()
 
-    asc ++ desc
+    desc ++ asc
   end
 
   def map_projects(%Ch.Result{rows: rows}) do
@@ -291,8 +305,9 @@ Logs.get_logs!(pid)
 defmodule ClickhouseLoadtest do
   use GenServer
 
-  @concurrency 10
+  @concurrency 7
   @requests_per_task 1
+  @tick 1_000
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -386,11 +401,11 @@ defmodule ClickhouseLoadtest do
   end
 
   defp do_requests() do
-    Process.send_after(self(), :do_requests, 1_000)
+    Process.send_after(self(), :do_requests, @tick)
   end
 
   defp puts_state() do
-    Process.send_after(self(), :puts_state, 1_000)
+    Process.send_after(self(), :puts_state, @tick)
   end
 
   defp bytes_to_gb(bytes) do
@@ -436,4 +451,4 @@ for i <- 1..150 do
 end
 ```
 
-<!-- livebook:{"offset":12055,"stamp":{"token":"XCP.OJ-CHOPqXebLoicPyuR8mW3Hgk0EdBzHcnH9YKyQ7_UnyaZ46I2tZV6JNDuTx9sP-L4JpMm_80fs6xmGcQTiRH7pJ9Hj7_TSClF-U-wEpEX_gos-5S8pCfyJx86N1YALzvkzOiQxooulehiv1KbIFDtodSc7e1M","version":2}} -->
+<!-- livebook:{"offset":12584,"stamp":{"token":"XCP.TuSp4GsxkFHzTa4MdC42bod6JQA415o12xriQ3szixihqcVgjX2VLMo3AJcCkSiC95AcvkN_BjZBv-7NuoRsCT571hpTmc-AyhiiPGV-Bym3-MXnrMtBkr1WG62wAvbut_e_VQOWuKNotdhySmrkt7_gA3Dj0ys","version":2}} -->
