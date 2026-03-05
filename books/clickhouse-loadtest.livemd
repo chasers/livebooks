@@ -5,7 +5,8 @@ Mix.install([
   {:ch, "~> 0.3.2"},
   {:kino, "~> 0.16.0"},
   {:kino_vega_lite, "~> 0.1.11"},
-  {:vega_lite, "~> 0.1.10"}
+  {:vega_lite, "~> 0.1.10"},
+  {:jason, "~> 1.4"}
 ])
 ```
 
@@ -20,8 +21,9 @@ defaults = [
   settings: [],
   pool_size: 25,
   timeout: :timer.seconds(15),
-  username: "logflare",
-  password: System.get_env("LB_SB_CH_AB6JFB0Q6S_LOGFLARE")
+  username: "chase_read_only",
+  password: System.get_env("LB_SB_CH_AB6JFB0Q6S_LOGFLARE"),
+  queue_target: 1_000
 ]
 
 # note that starting in ClickHouse 25.1.3.23 `default` user doesn't have
@@ -34,24 +36,253 @@ defaults = [
 %Ch.Result{} = Ch.query!(pid, "select 1")
 ```
 
+## SqlBuilder
+
+```elixir
+defmodule SqlBuilder do
+  @moduledoc """
+  A composable SQL query builder for constructing dynamic queries.
+
+  ## Example
+
+      SqlBuilder.new()
+      |> SqlBuilder.select([:timestamp, :project, :id, :event_message])
+      |> SqlBuilder.from("my_table")
+      |> SqlBuilder.where("timestamp >= now() - interval {minutes} minute", minutes: 10)
+      |> SqlBuilder.where("project = {project}", project: "my_project")
+      |> SqlBuilder.where_in("source_name", ["deno-relay-logs", "deno-subhosting-events"])
+      |> SqlBuilder.order_by(:timestamp, :desc)
+      |> SqlBuilder.limit(100)
+      |> SqlBuilder.setting(:query_plan_optimize_lazy_materialization, 1)
+      |> SqlBuilder.to_sql()
+  """
+
+  @type t :: %__MODULE__{
+          select: [String.t()],
+          from: String.t() | nil,
+          where: [String.t()],
+          params: keyword(),
+          order_by: [{String.t(), :asc | :desc}],
+          limit: pos_integer() | nil,
+          settings: keyword()
+        }
+
+  defstruct select: [],
+            from: nil,
+            where: [],
+            params: [],
+            order_by: [],
+            limit: nil,
+            settings: []
+
+  @doc "Create a new empty query builder."
+  @spec new() :: t()
+  def new, do: %__MODULE__{}
+
+  @doc "Set the SELECT columns. Accepts atoms or strings."
+  @spec select(t(), [atom() | String.t()] | atom() | String.t()) :: t()
+  def select(%__MODULE__{} = q, columns) when is_list(columns) do
+    cols = Enum.map(columns, &to_string/1)
+    %{q | select: q.select ++ cols}
+  end
+
+  def select(%__MODULE__{} = q, column), do: select(q, [column])
+
+  @doc "Set the FROM table. Accepts a string or atom."
+  @spec from(t(), String.t() | atom()) :: t()
+  def from(%__MODULE__{} = q, table), do: %{q | from: to_string(table)}
+
+  @doc """
+  Add a WHERE clause with optional named parameters.
+
+  Parameters are written as `{param_name}` in the clause string and
+  passed as a keyword list. String values are automatically quoted.
+
+      |> where("project = {project}", project: "my_project")
+      |> where("timestamp >= now() - interval {minutes} minute", minutes: 10)
+  """
+  @spec where(t(), String.t(), keyword()) :: t()
+  def where(%__MODULE__{} = q, clause, params \\ []) do
+    rendered = render_params(clause, params)
+    %{q | where: q.where ++ [rendered]}
+  end
+
+  @doc "Add a WHERE col IN (...) clause."
+  @spec where_in(t(), String.t() | atom(), [term()]) :: t()
+  def where_in(%__MODULE__{} = q, column, values) when is_list(values) do
+    formatted =
+      values
+      |> Enum.map(&format_value/1)
+      |> Enum.join(", ")
+
+    clause = "#{column} in (#{formatted})"
+    %{q | where: q.where ++ [clause]}
+  end
+
+  @doc "Add an ORDER BY clause."
+  @spec order_by(t(), String.t() | atom(), :asc | :desc) :: t()
+  def order_by(%__MODULE__{} = q, column, direction \\ :asc)
+      when direction in [:asc, :desc] do
+    %{q | order_by: q.order_by ++ [{to_string(column), direction}]}
+  end
+
+  @doc "Set the LIMIT."
+  @spec limit(t(), pos_integer()) :: t()
+  def limit(%__MODULE__{} = q, n) when is_integer(n) and n > 0, do: %{q | limit: n}
+
+  @doc "Add a ClickHouse SETTINGS key-value pair."
+  @spec setting(t(), atom() | String.t(), term()) :: t()
+  def setting(%__MODULE__{} = q, key, value) do
+    %{q | settings: q.settings ++ [{key, value}]}
+  end
+
+  @doc "Add multiple ClickHouse SETTINGS at once from a keyword list."
+  @spec settings(t(), keyword()) :: t()
+  def settings(%__MODULE__{} = q, kv) when is_list(kv) do
+    Enum.reduce(kv, q, fn {k, v}, acc -> setting(acc, k, v) end)
+  end
+
+  @doc "Build and return the final SQL string."
+  @spec to_sql(t()) :: String.t()
+  def to_sql(%__MODULE__{} = q) do
+    [
+      build_select(q),
+      build_from(q),
+      build_where(q),
+      build_order_by(q),
+      build_limit(q),
+      build_settings(q)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  # ── Private helpers ──────────────────────────────────────────────────────────
+
+  defp build_select(%{select: []}), do: "select *"
+
+  defp build_select(%{select: cols}) do
+    indented = cols |> Enum.map(&"  #{&1}") |> Enum.join("\n  ,")
+    "select\n  #{indented}"
+  end
+
+  defp build_from(%{from: nil}), do: nil
+  defp build_from(%{from: table}), do: "from #{table}"
+
+  defp build_where(%{where: []}), do: nil
+
+  defp build_where(%{where: clauses}) do
+    lines = clauses |> Enum.map(&"  and #{&1}") |> Enum.join("\n")
+    "where true\n#{lines}"
+  end
+
+  defp build_order_by(%{order_by: []}), do: nil
+
+  defp build_order_by(%{order_by: cols}) do
+    parts = Enum.map(cols, fn {col, dir} -> "#{col} #{dir}" end)
+    "order by #{Enum.join(parts, ", ")}"
+  end
+
+  defp build_limit(%{limit: nil}), do: nil
+  defp build_limit(%{limit: n}), do: "limit #{n}"
+
+  defp build_settings(%{settings: []}), do: nil
+
+  defp build_settings(%{settings: kv}) do
+    lines =
+      kv
+      |> Enum.map(fn {k, v} -> "  #{k}=#{v}" end)
+      |> Enum.join(",\n")
+
+    "settings\n#{lines}"
+  end
+
+  # Replace {param} tokens with formatted values
+  defp render_params(clause, []), do: clause
+
+  defp render_params(clause, params) do
+    Enum.reduce(params, clause, fn {key, value}, acc ->
+      String.replace(acc, "{#{key}}", format_value(value))
+    end)
+  end
+
+  defp format_value(v) when is_binary(v), do: "'#{v}'"
+  defp format_value(v) when is_atom(v), do: "'#{v}'"
+  defp format_value(v), do: to_string(v)
+end
+```
+
+## Projects
+
+```elixir
+defmodule Projects do
+  def get_projects(pid) do
+    table = "otel_logs_e2338e81_aed4_4de0_a5a0_358084c77b85"
+    sources = ["deno-relay-logs", "deno-subhosting-events"]
+
+    base =
+      SqlBuilder.new()
+      |> SqlBuilder.select([:project])
+      |> SqlBuilder.from(table)
+      |> SqlBuilder.where("timestamp >= now() - interval {minutes} minute", minutes: 10)
+      # |> SqlBuilder.where_in("source_name", sources)
+      |> SqlBuilder.limit(100)
+      |> SqlBuilder.settings(
+        query_plan_optimize_lazy_materialization: 1,
+        use_skip_indexes_for_top_k: 1,
+        use_skip_indexes_on_data_read: 1,
+        use_top_k_dynamic_filtering: 1,
+        query_plan_max_limit_for_top_k_optimization: 3000
+      )
+
+    desc_sql = base |> SqlBuilder.order_by(:timestamp, :desc) |> SqlBuilder.to_sql()
+    asc_sql = base |> SqlBuilder.order_by(:timestamp, :asc) |> SqlBuilder.to_sql()
+
+    desc = Ch.query!(pid, desc_sql) |> Projects.map_projects()
+    asc = Ch.query!(pid, asc_sql) |> Projects.map_projects()
+
+    asc ++ desc
+  end
+
+  def map_projects(%Ch.Result{rows: rows}) do
+    Enum.map(rows, &hd/1)
+  end
+end
+
+projects = Projects.get_projects(pid)
+```
+
+## Logs
+
 ```elixir
 defmodule Logs do
-  def get_logs(pid) do
-    table = "parsed_log_events_0a645cf3_dd0b_447a_8e37_ed7da0433c02"
+  def get_logs!(pid, project \\ "tvfsnnixsbbqdbowmqla") do
+    table = "otel_logs_e2338e81_aed4_4de0_a5a0_358084c77b85"
+    sources = ["deno-relay-logs", "deno-subhosting-events"]
 
-    sql = """
-    select timestamp, id, event_message
-    from #{table}
-    -- where date(timestamp) = current_date()
-    order by timestamp desc
-    limit 100;
-    """
+    sql =
+      SqlBuilder.new()
+      |> SqlBuilder.select([:timestamp, :project, :id, :event_message])
+      |> SqlBuilder.from(table)
+      |> SqlBuilder.where("timestamp >= now() - interval {minutes} minute", minutes: 1)
+      |> SqlBuilder.where("project = {project}", project: project)
+      # |> SqlBuilder.where_in("source_name", sources)
+      |> SqlBuilder.order_by(:timestamp, :desc)
+      |> SqlBuilder.limit(100)
+      |> SqlBuilder.settings(
+        query_plan_optimize_lazy_materialization: 1,
+        use_skip_indexes_for_top_k: 1,
+        use_skip_indexes_on_data_read: 1,
+        use_top_k_dynamic_filtering: 1,
+        query_plan_max_limit_for_top_k_optimization: 3000
+      )
+      |> SqlBuilder.to_sql()
 
     Ch.query!(pid, sql)
   end
 end
 
-Logs.get_logs(pid)
+Logs.get_logs!(pid)
 ```
 
 ## Setup GenServer
@@ -60,35 +291,44 @@ Logs.get_logs(pid)
 defmodule ClickhouseLoadtest do
   use GenServer
 
-  @concurrency 50
+  @concurrency 10
+  @requests_per_task 1
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def init(pid: pid) do
+  def init(pid: pid, projects: projects) do
     puts_state()
     do_requests()
-    {:ok, %{times: [], pid: pid, times_counter: 0}}
+    {:ok, %{times: [], pid: pid, times_counter: 0, projects: projects, total_read_bytes: 0}}
   end
 
-  def run_requests(pid, concurrency) do
+  def run_requests(pid, concurrency, projects) do
     Enum.each(1..concurrency, fn _n ->
+      project = Enum.random(projects)
+
       Task.start(fn ->
-        t0 = System.monotonic_time(:millisecond)
+        for _n <- 1..@requests_per_task do
+          :rand.uniform(100) |> Process.sleep()
+          t0 = System.monotonic_time(:millisecond)
 
-        try do
-          Logs.get_logs(pid)
-        rescue
-          e ->
-            IO.inspect(e, label: "ERROR")
-            :error
+          ch_resp =
+            try do
+              Logs.get_logs!(pid, project)
+            rescue
+              e ->
+                IO.inspect(e, label: "ERROR")
+                :error
+            end
+
+          t1 = System.monotonic_time(:millisecond)
+          duration = t1 - t0
+          {:ok, %{"read_bytes" => read_bytes}} = parse_ch_response(ch_resp)
+          read_bytes = String.to_integer(read_bytes)
+
+          GenServer.cast(__MODULE__, {:record, {duration, read_bytes}})
         end
-
-        t1 = System.monotonic_time(:millisecond)
-        duration = t1 - t0
-
-        GenServer.cast(__MODULE__, {:record_time, duration})
       end)
     end)
   end
@@ -97,28 +337,48 @@ defmodule ClickhouseLoadtest do
     GenServer.call(__MODULE__, :get_avg)
   end
 
-  def handle_info(:do_requests, %{pid: pid} = state) do
-    run_requests(pid, @concurrency)
+  def handle_info(:do_requests, %{pid: pid, projects: projects} = state) do
+    run_requests(pid, @concurrency, projects)
     do_requests()
     {:noreply, state}
   end
 
-  def handle_info(:puts_state, %{times: times, times_counter: counter} = state) do
+  def handle_info(
+        :puts_state,
+        %{times: times, times_counter: counter, total_read_bytes: total_read_bytes} = state
+      ) do
     last = Enum.take(times, @concurrency)
     avg = avg(last)
     IO.puts("Completed requests: #{counter}")
     IO.puts("Avg response time: #{avg}")
+    IO.puts("Total read GBs: #{bytes_to_gb(total_read_bytes)}")
 
     puts_state()
     {:noreply, state}
   end
 
-  def handle_cast({:record_time, duration}, %{times: times, times_counter: counter} = state) do
-    {:noreply, %{state | times: [duration | times], times_counter: counter + 1}}
+  def handle_cast(
+        {:record, {duration, read_bytes}},
+        %{times: times, times_counter: counter, total_read_bytes: total_read_bytes} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | times: [duration | times],
+         times_counter: counter + 1,
+         total_read_bytes: read_bytes + total_read_bytes
+     }}
   end
 
   def handle_call(:get_avg, _from, %{times: times} = state) do
     {:reply, avg(times), state}
+  end
+
+  defp parse_ch_response(%Ch.Result{headers: headers}) do
+    for {"x-clickhouse-summary", summary} <- headers do
+      Jason.decode(summary)
+    end
+    |> hd()
   end
 
   defp avg(times) do
@@ -132,11 +392,17 @@ defmodule ClickhouseLoadtest do
   defp puts_state() do
     Process.send_after(self(), :puts_state, 1_000)
   end
+
+  defp bytes_to_gb(bytes) do
+    bytes / 1000 / 1000 / 1000
+  end
 end
 ```
 
+## Start it
+
 ```elixir
-ClickhouseLoadtest.start_link(pid: pid)
+ClickhouseLoadtest.start_link(pid: pid, projects: projects)
 ```
 
 ## Graph
@@ -170,4 +436,4 @@ for i <- 1..150 do
 end
 ```
 
-<!-- livebook:{"offset":3635,"stamp":{"token":"XCP.xoBl5FRTtzfhNpGrpKKhNxeZN_jnv9pNXeV6VCKZaLQ8BIi5cf1nOv02R-cMLi4Zj9u4PY8xjc4NDdXeQwgmyQQN4GEdcQLPvox3dvZB9O9ukiP6Aom11TSgQg-7pEBAJcsUFPNGFf_sTHcTlagqrijnBCzCA7c","version":2}} -->
+<!-- livebook:{"offset":12068,"stamp":{"token":"XCP.Wk-V__VNbP5SPzmuZGyKtBW43JTJaRmkL6xirhSOalXrxVApCFIUgM8vDeUDraa6uT-IvOgoNTN2TY8terZ9mUkngRPr3ZSQOiSgl1TxHAhNH6DVgAfOL-rgH6hyKHdWcZYY-kBy_umt83TMDTD8ESWqbIW2BIQ","version":2}} -->
