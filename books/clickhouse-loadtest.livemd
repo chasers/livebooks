@@ -256,7 +256,7 @@ projects = Projects.get_projects(pid)
 
 ```elixir
 defmodule Logs do
-  def get_logs!(pid, project \\ "tvfsnnixsbbqdbowmqla") do
+  def get_logs!(pid, project \\ "project") do
     table = "otel_logs_e2338e81_aed4_4de0_a5a0_358084c77b85"
     sources = ["deno-relay-logs", "deno-subhosting-events"]
 
@@ -436,4 +436,4 @@ for i <- 1..150 do
 end
 ```
 
-<!-- livebook:{"offset":12068,"stamp":{"token":"XCP.Wk-V__VNbP5SPzmuZGyKtBW43JTJaRmkL6xirhSOalXrxVApCFIUgM8vDeUDraa6uT-IvOgoNTN2TY8terZ9mUkngRPr3ZSQOiSgl1TxHAhNH6DVgAfOL-rgH6hyKHdWcZYY-kBy_umt83TMDTD8ESWqbIW2BIQ","version":2}} -->
+<!-- livebook:{"offset":12055,"stamp":{"token":"XCP.OJ-CHOPqXebLoicPyuR8mW3Hgk0EdBzHcnH9YKyQ7_UnyaZ46I2tZV6JNDuTx9sP-L4JpMm_80fs6xmGcQTiRH7pJ9Hj7_TSClF-U-wEpEX_gos-5S8pCfyJx86N1YALzvkzOiQxooulehiv1KbIFDtodSc7e1M","version":2}} -->
