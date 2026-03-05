@@ -447,10 +447,20 @@ defmodule ClickhouseLoadtest do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def init(pid: pid, projects: projects) do
+  def init(pid: pid, projects: projects, charts: charts) do
     puts_state()
     do_requests()
-    {:ok, %{times: [], pid: pid, times_counter: 0, projects: projects, total_read_bytes: 0}}
+
+    {:ok,
+     %{
+       times: [],
+       pid: pid,
+       times_counter: 0,
+       projects: projects,
+       total_read_bytes: 0,
+       charts: charts,
+       start_time: System.monotonic_time(:second)
+     }}
   end
 
   def run_requests(pid, concurrency, projects) do
@@ -494,13 +504,33 @@ defmodule ClickhouseLoadtest do
 
   def handle_info(
         :puts_state,
-        %{times: times, times_counter: counter, total_read_bytes: total_read_bytes} = state
+        %{
+          times: times,
+          times_counter: counter,
+          total_read_bytes: total_read_bytes,
+          charts: %{response_time: rt_chart, throughput: tp_chart},
+          start_time: start_time
+        } = state
       ) do
     last = Enum.take(times, @concurrency)
-    avg = avg(last)
+    avg_time = avg(last)
+    elapsed = System.monotonic_time(:second) - start_time
+    read_gb = bytes_to_gb(total_read_bytes)
+
     IO.puts("Completed requests: #{counter}")
-    IO.puts("Avg response time: #{avg}")
-    IO.puts("Total read GBs: #{bytes_to_gb(total_read_bytes)}")
+    IO.puts("Avg response time: #{avg_time}")
+    IO.puts("Total read GBs: #{read_gb}")
+
+    # Push aggregated stats to charts
+    Kino.VegaLite.push(rt_chart, %{time: elapsed, avg_response_time: avg_time})
+
+    Kino.VegaLite.push(tp_chart, %{time: elapsed, value: counter, metric: "Requests"})
+
+    Kino.VegaLite.push(tp_chart, %{
+      time: elapsed,
+      value: Float.round(read_gb, 2),
+      metric: "GB Read"
+    })
 
     puts_state()
     {:noreply, state}
@@ -548,47 +578,46 @@ defmodule ClickhouseLoadtest do
 end
 ```
 
-## Start it
-
-Starts the load test GenServer. Once started, it immediately begins executing concurrent queries and printing statistics every second. The process runs continuously until stopped.
-
-```elixir
-ClickhouseLoadtest.start_link(pid: pid, projects: projects)
-```
-
 ## Graph
 
-Placeholder for real-time visualization of load test metrics (response times, throughput, etc.).
-
-```elixir
-# todo
-```
-
-## Graph Test
-
-Demo of real-time charting with Kino and VegaLite. Renders a sine wave by pushing points to the chart incrementally. Use this as a reference for implementing the live metrics graph above.
+Creates live-updating charts that display metrics as the load test runs. The charts update every tick with aggregated statistics: average response time, total requests, and data read.
 
 ```elixir
 alias VegaLite, as: Vl
 
-alias TinyColor.{Conversions, HSL, RGB}
-color = fn i -> HSL.new(i, 0.8, 0.7) |> Conversions.to_rgb() |> RGB.to_string() end
-
-chart =
-  Vl.new(width: 400, height: 400)
-  |> Vl.mark(:line, stroke: [signal: "stroke"], stroke_width: 3)
-  |> Vl.param("xTitle", value: "X at iteration 0")
-  |> Vl.param("stroke", value: "#000")
-  |> Vl.encode_field(:x, "x", type: :quantitative)
-  |> Vl.encode_field(:y, "y", type: :quantitative)
+response_time_chart =
+  Vl.new(width: 600, height: 250, title: "Average Response Time (ms)")
+  |> Vl.mark(:line, point: true, tooltip: true, color: "#3b82f6")
+  |> Vl.encode_field(:x, "time",
+    type: :quantitative,
+    title: "Elapsed Time (seconds)"
+  )
+  |> Vl.encode_field(:y, "avg_response_time",
+    type: :quantitative,
+    title: "Avg Response Time (ms)"
+  )
   |> Kino.VegaLite.new()
-  |> Kino.render()
 
-for i <- 1..150 do
-  point = %{x: i / 10, y: :math.sin(i / 10)}
-  Kino.VegaLite.push(chart, point)
-  Process.sleep(25)
-end
+throughput_chart =
+  Vl.new(width: 600, height: 250, title: "Cumulative Requests & Data Read")
+  |> Vl.mark(:line, point: true, tooltip: true)
+  |> Vl.encode_field(:x, "time", type: :quantitative, title: "Elapsed Time (seconds)")
+  |> Vl.encode_field(:y, "value", type: :quantitative, title: "Value")
+  |> Vl.encode_field(:color, "metric", type: :nominal, title: "Metric")
+  |> Kino.VegaLite.new()
+
+Kino.Layout.grid([response_time_chart, throughput_chart], columns: 1)
+|> Kino.render()
+
+charts = %{response_time: response_time_chart, throughput: throughput_chart}
 ```
 
-<!-- livebook:{"offset":17514,"stamp":{"token":"XCP.e2CkvhnHt-oAwWjSwi6_GycLaPE1Law8Q3KofJZCTsdGyd5H9UvTSuzeQrYBe2IIW6xQBH6LidoA0yJPLM6xefmIrzYhtrgxidrOVRus9KJ0p2zeDQRADfTjznZTxGboJhVnojHRpiZGyyvu4qDkeM52oT0tj5E","version":2}} -->
+## Start it
+
+Starts the load test GenServer with the live charts. Once started, it immediately begins executing concurrent queries, printing statistics every second, and pushing metrics to the charts in real-time.
+
+```elixir
+ClickhouseLoadtest.start_link(pid: pid, projects: projects, charts: charts)
+```
+
+<!-- livebook:{"offset":19318,"stamp":{"token":"XCP.YLv2b1fDxNGlMjjKgOHqsDDbZYrb4_Ztm0gSe8R4BCUAPQoNLROs6h8pODA3QOZoLAqogm0nsiUmnIhYbAQtBYESVLt5zbHmJs-ntTNYX27nKEPTxC-gBLIJFZ93Qa6YWymbBsV5bLtg7qicCihtBp5w3H0FoeY","version":2}} -->
